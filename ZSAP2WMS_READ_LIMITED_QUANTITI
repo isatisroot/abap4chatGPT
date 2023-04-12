@@ -1,0 +1,428 @@
+FUNCTION zsap2wms_read_limited_quantiti.
+*"----------------------------------------------------------------------
+*"*"本地接口：
+*"  IMPORTING
+*"     VALUE(I_MATNR) TYPE  MATNR
+*"     VALUE(I_LGORT) TYPE  LGORT_D OPTIONAL
+*"  TABLES
+*"      O_ITAB STRUCTURE  ZWMS_MATNR_MENGEX OPTIONAL
+*"----------------------------------------------------------------------
+
+
+
+  DATA : BEGIN OF  itab_ac  OCCURS 0,
+           werks      LIKE mard-werks,
+           matnr      LIKE mara-matnr,
+           maktx      LIKE makt-maktx,
+*       BWART LIKE MSEG-BWART,
+           erfmg      LIKE mseg-erfmg,
+           labst      LIKE mard-labst, "非限制使用的估价的库存
+           insme      LIKE mard-insme, "质量检验中的库存
+           klabs      LIKE mard-klabs, "非限制使用的寄售库存
+           kinsm      LIKE mard-kinsm, "处于质量检查中的寄存库存
+           speme      LIKE mard-speme,
+           menge      LIKE mseg-erfmg,     "最高库存
+           menge2     LIKE mseg-erfmg,    "最低库存
+           lbfl       LIKE zmm_zsckkz-lbfl, "ABC款分类
+           ckfl       LIKE zmm_zsckkz-lbfl, "ABC款参考分类
+           ackc       LIKE zmm_zsckkz-ackc, "安全库存
+           kczzts(3)  TYPE c , "周转天数
+           kcxs       LIKE zmm_zsckkz-kcxs, "库存系数
+           erfmg1     LIKE mseg-erfmg,    "三个月平均月用量
+           erfmg2     LIKE mseg-erfmg,    "三个月平均日用量
+           mengex     LIKE mard-labst,    "允许入库量
+           mengek     LIKE mard-labst,    "现有库存
+           txsh       LIKE mseg-erfmg,
+           beizhu(40) TYPE c,
+           use        TYPE i, "累计有用量月份数
+           po         TYPE i,  "近3个月内采购下单次数（排除内部转卖订单）
+           menge_po   LIKE mseg-erfmg, "有效采购订单未清数量（排除内部转卖订单）
+           yj_menge   LIKE zmmcontinmigo3-yj_menge, "预计用量
+           kcdy(4)    TYPE c, "库存定义
+           zzts(6)    TYPE p DECIMALS 1, "周转天数
+           zq(6)      TYPE p DECIMALS 1, "交货周期
+           sc_menge   LIKE resb-bdmng, "未清生产订单数
+           color(4)   TYPE c,
+           matkl      LIKE mara-matkl, "物料组
+           wgbez      LIKE t023t-wgbez, "物料组描述
+           menge_yl   LIKE resb-bdmng, "订单预留
+           paim(3)    TYPE c,
+           wdatu      LIKE lqua-wdatu,
+           eindt      LIKE eket-eindt,
+         END OF itab_ac.
+  DATA itab_ac1 LIKE TABLE OF itab_ac WITH HEADER LINE.
+
+  DATA :BEGIN OF itab_a OCCURS 0,   "计算平均用量
+*      WERKS LIKE MSEG-WERKS,
+          budat    LIKE mkpf-budat,
+          matnr    LIKE mard-matnr,
+          bwart    LIKE mseg-bwart,  "
+          erfmg    LIKE mseg-erfmg,
+          erfmg1   TYPE p,       "平均月用量
+          erfmg2   TYPE p,       "平均日用量
+          month(6) TYPE c,
+        END OF itab_a.
+  DATA itab_a1 LIKE TABLE OF itab_a WITH HEADER LINE.
+  DATA itab_a2 LIKE TABLE OF itab_a WITH HEADER LINE.   "导入计算用量表
+  DATA itab_a3 LIKE TABLE OF itab_a WITH HEADER LINE.   "导入计算用量表
+  DATA itab_month LIKE TABLE OF itab_a WITH HEADER LINE.
+
+  DATA: r_lgort TYPE RANGE OF lgort_d WITH HEADER LINE.
+
+  IF i_lgort IS NOT INITIAL.
+    r_lgort-sign = 'I'.
+    r_lgort-option = 'EQ'.
+    r_lgort-low = i_lgort.
+    APPEND r_lgort.
+
+  ENDIF.
+
+
+  DATA:BEGIN OF it_ebeln OCCURS 0,
+         ebeln LIKE ekko-ebeln,
+       END OF it_ebeln.
+  DATA itco_mi LIKE TABLE OF zmmcontinmigo2.
+  DATA p_zmmcontinmigo3 TYPE zmmcontinmigo3.
+  DATA: pp_menge1 LIKE plaf-gsmng,pp_menge2 LIKE plaf-gsmng,pp_menge3 LIKE plaf-gsmng,pp_menge4 LIKE plaf-gsmng.
+  DATA:pp_bdmng LIKE resb-bdmng,pp_enmng LIKE resb-enmng.
+  DATA it_migo LIKE TABLE OF zmmcontinmigo2 WITH HEADER LINE.
+
+
+
+  "   0、  计算BUDAT1上个月的日期  BUDAT2上3个月的日期
+  DATA s_budat LIKE sy-datum .
+  DATA s_budat1 LIKE sy-datum.
+  DATA :budat  LIKE sy-datum,
+        budat1 LIKE sy-datum,
+        budat2 LIKE sy-datum,
+        budat3 LIKE sy-datum.
+  DATA tem LIKE  bkpf-monat.
+
+  s_budat = sy-datum.
+
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = i_matnr
+    IMPORTING
+      output = i_matnr.
+
+  "
+  CALL FUNCTION 'RP_CALC_DATE_IN_INTERVAL'
+    EXPORTING
+      date      = s_budat   "输入日期
+      days      = 90            "天数
+      months    = 0             "月数
+      signum    = '-'           "+号：表示 N天/月/年后的日期， -号：表示过去的日期
+      years     = 0             "年数
+    IMPORTING
+      calc_date = budat3.    "当前6.4 返回3.6  从3.6至6.4 共91天，
+  "  BUDAT3  累计有用量月份数开始日期
+
+  tem = s_budat+4(2).
+  IF tem = 03 OR tem = 04 OR tem =  05  .    "2月份放假，所以遇到有2月份的都加一个月，3 4 5 月份按4个月算
+    CALL FUNCTION 'CCM_GO_BACK_MONTHS'
+      EXPORTING
+        currdate   = s_budat   "输入日期
+        backmonths = 1            "过去月数
+      IMPORTING
+        newdate    = budat.   "返回日期
+
+    CALL FUNCTION 'BKK_GET_MONTH_LASTDAY'
+      EXPORTING
+        i_date = budat   "输入日期
+      IMPORTING
+        e_date = budat1.        "返回日期
+
+    CALL FUNCTION 'CCM_GO_BACK_MONTHS'
+      EXPORTING
+        currdate   = s_budat   "输入日期
+        backmonths = 4            "过去月数
+      IMPORTING
+        newdate    = budat2.   "返回日期
+
+  ELSE.
+    CALL FUNCTION 'CCM_GO_BACK_MONTHS'
+      EXPORTING
+        currdate   = s_budat   "输入日期
+        backmonths = 1            "过去月数
+      IMPORTING
+        newdate    = budat.   "返回日期
+
+    CALL FUNCTION 'BKK_GET_MONTH_LASTDAY'
+      EXPORTING
+        i_date = budat   "输入日期
+      IMPORTING
+        e_date = budat1.        "返回日期
+
+    CALL FUNCTION 'CCM_GO_BACK_MONTHS'
+      EXPORTING
+        currdate   = s_budat   "输入日期
+        backmonths = 3            "过去月数
+      IMPORTING
+        newdate    = budat2.   "返回日期
+  ENDIF.
+
+  budat2+6(2) = '01'.  "如当前日期 2022.01.17  得到日期BUDAT1=2021.12.31 ； BUDAT2=2021.10.01
+
+
+  DATA:BEGIN OF it_sale OCCURS 0 ,
+         matnr     LIKE mara-matnr,
+         menge     LIKE mseg-menge,
+         bwart     LIKE mseg-bwart,
+         paim(3)   TYPE c,
+         verpr     LIKE mbew-verpr,
+         peinh     LIKE mbew-peinh,
+         jiner(13) TYPE p DECIMALS 2,
+       END OF it_sale.
+  DATA it_sale_sum LIKE it_sale OCCURS 0 WITH HEADER LINE.
+
+  "   1、  先找出移动类型和数量
+  SELECT mseg~matnr  mseg~erfmg AS menge  mseg~bwart INTO CORRESPONDING FIELDS OF TABLE it_sale
+    FROM mseg
+    INNER JOIN mkpf ON mseg~mblnr = mkpf~mblnr
+    INNER JOIN zmmcontinmigo2 ON mseg~matnr = zmmcontinmigo2~matnr
+    WHERE  bwart IN ('201','261','541','202','262','542')
+      AND xauto = ''
+      AND budat BETWEEN budat2 AND budat1
+      AND werks NOT IN ('FZ11','FZ18','FZ22','FZ25').
+
+  LOOP AT it_sale.
+    CASE it_sale-bwart.
+      WHEN '262' OR '202' OR '542'.
+        it_sale-menge = 0 - it_sale-menge.
+    ENDCASE.
+    it_sale-bwart = ''.
+    COLLECT it_sale INTO it_sale_sum.
+  ENDLOOP.
+
+  "   3、  计算移动平均价和价格单位
+  LOOP AT it_sale_sum.
+    SELECT SINGLE verpr peinh INTO (it_sale_sum-verpr,it_sale_sum-peinh) FROM mbew WHERE matnr = it_sale_sum-matnr.
+    IF it_sale_sum-peinh <> 0.
+      it_sale_sum-jiner = it_sale_sum-menge * ( it_sale_sum-verpr / it_sale_sum-peinh ).
+      MODIFY it_sale_sum.
+    ENDIF.
+  ENDLOOP.
+
+  SORT it_sale_sum BY jiner.
+  LOOP AT it_sale_sum . "取得销量前100物料 标注 ‘爆款’
+    IF sy-tabix = 101.
+      EXIT.
+    ENDIF.
+    it_sale_sum-paim = '冷款'.
+    MODIFY it_sale_sum.
+  ENDLOOP.
+
+  SORT it_sale_sum BY jiner DESCENDING.
+  LOOP AT it_sale_sum . "取得销量后100物料 标注 ‘冷款’
+    IF sy-tabix = 101.
+      EXIT.
+    ENDIF.
+    it_sale_sum-paim = '爆款'.
+    MODIFY it_sale_sum.
+  ENDLOOP.
+  SORT it_sale_sum BY matnr.
+
+
+*    ------物料提取--------------------------------------------------------------*
+
+  SELECT mara~matnr mara~matkl t023t~wgbez maktx
+    INTO CORRESPONDING FIELDS OF TABLE itab_ac
+    FROM mara
+    INNER JOIN mard ON mard~matnr = mara~matnr
+    INNER JOIN makt ON makt~matnr = mara~matnr
+    INNER JOIN t023t ON t023t~matkl = mara~matkl
+    WHERE mara~matnr = i_matnr AND mard~lgort IN r_lgort
+     AND  mara~mtart NOT IN ('ZFIM','ZFIN','ZFIO') AND makt~spras = '1'.
+
+  SORT itab_ac BY matnr .
+  DELETE ADJACENT DUPLICATES FROM itab_ac COMPARING ALL FIELDS .
+
+
+
+*------库存提取、控制数据提取-------------------------------------------------*
+  LOOP AT itab_ac.
+    CLEAR itab_a1[].
+    SELECT SUM( labst ) SUM( insme ) SUM( klabs ) SUM( kinsm )
+      INTO (itab_ac-labst,itab_ac-insme,itab_ac-klabs,itab_ac-kinsm)  FROM mard WHERE matnr  = itab_ac-matnr  AND mard~diskz <>  '1'
+                 AND werks NOT IN ('FZ11','FZ18','FZ22','FZ25').
+
+    SELECT SINGLE lbfl ackc  kcxs menge beizhu kczzts yj_menge
+      INTO (itab_ac-lbfl,itab_ac-ackc,itab_ac-kcxs,itab_ac-menge,itab_ac-beizhu,itab_ac-kczzts,itab_ac-yj_menge)
+      FROM zmmcontinmigo2
+      WHERE matnr = itab_ac-matnr.
+
+
+*  ---------------------------201 261 541 202 262 542----------------------------*
+    SELECT mseg~matnr  mseg~bwart SUM( erfmg ) AS erfmg
+      INTO CORRESPONDING FIELDS OF TABLE itab_a1 FROM mseg    "取累计发料数
+       INNER JOIN mkpf ON mseg~mblnr = mkpf~mblnr
+      WHERE  bwart IN ('201','261','541','202','262','542')
+        AND xauto = ''
+        AND budat BETWEEN budat2 AND budat1
+        AND mseg~matnr = itab_ac-matnr AND werks NOT IN ('FZ11','FZ18','FZ22','FZ25')
+       GROUP BY mseg~matnr  mseg~bwart  .
+
+
+    itab_ac-mengek = itab_ac-labst + itab_ac-insme + itab_ac-klabs + itab_ac-kinsm.  "现有库存合计 = 可用库存+质检库存+寄售可用+寄售质检
+
+    LOOP AT  itab_a1.
+      CASE itab_a1-bwart.
+        WHEN '262' OR '202' OR '542'.
+          itab_a1-erfmg = 0 - itab_a1-erfmg.  "用量汇总
+      ENDCASE.
+      itab_a1-bwart = ''.
+      MODIFY itab_a1.
+      COLLECT itab_a1 INTO itab_a.
+    ENDLOOP.
+
+    LOOP AT itab_a.
+      itab_a-erfmg1 = itab_a-erfmg / 3 . "月均用量
+      itab_a-erfmg2 = itab_a-erfmg / 90 ."日均用量
+
+      itab_ac-erfmg1 = itab_a-erfmg1.
+      itab_ac-erfmg2 = itab_a-erfmg2.
+      MODIFY itab_a.
+    ENDLOOP.
+
+    CALL FUNCTION 'ROUND'
+      EXPORTING
+        decimals      = 0       " 保留0位小数
+        input         = itab_ac-erfmg1
+        sign          = '+'     " + 向上取舍 - 向下取舍 （负数也一样）
+      IMPORTING
+        output        = itab_ac-erfmg1   " 输出返回结果
+      EXCEPTIONS
+        input_invalid = 1
+        overflow      = 2
+        type_invalid  = 3
+        OTHERS        = 4.
+    CALL FUNCTION 'ROUND'
+      EXPORTING
+        decimals      = 0       " 保留0位小数
+        input         = itab_ac-erfmg2
+        sign          = '+'     " + 向上取舍 - 向下取舍 （负数也一样）
+      IMPORTING
+        output        = itab_ac-erfmg2   " 输出返回结果
+      EXCEPTIONS
+        input_invalid = 1
+        overflow      = 2
+        type_invalid  = 3
+        OTHERS        = 4.
+
+    itab_ac-menge = itab_ac-erfmg1  * itab_ac-kcxs .  "最高库存 =  月均用量 * 库存系数
+
+
+    "---------累计有用量月份数  采购下单次数 未清采购订单
+    CLEAR itab_month[].
+    SELECT *  INTO CORRESPONDING FIELDS OF TABLE  itab_month FROM mseg
+      INNER JOIN mkpf ON mseg~mblnr = mkpf~mblnr
+      WHERE  bwart IN ('201','261','541','202','262','542')
+       AND xauto = ''
+       AND budat > budat3
+       AND mseg~matnr = itab_ac-matnr AND werks NOT IN ('FZ11','FZ18','FZ22','FZ25')
+      ORDER BY budat.
+
+    DELETE ADJACENT DUPLICATES FROM itab_month COMPARING budat.
+    LOOP AT itab_month.
+      itab_month-month = itab_month-budat+0(6).
+      MODIFY itab_month.
+    ENDLOOP.
+    DELETE ADJACENT DUPLICATES FROM itab_month COMPARING month.
+    itab_ac-use = lines( itab_month ).  "累计有用量月份数
+
+    "-----------采购下单次数
+    REFRESH it_ebeln[].
+    SELECT ekko~ebeln INTO CORRESPONDING FIELDS OF TABLE it_ebeln
+      FROM ekko
+      INNER JOIN ekpo ON ekpo~ebeln = ekko~ebeln
+      WHERE matnr = itab_ac-matnr AND ekko~memory <> 'X' AND ekpo~loekz = '' AND ekko~aedat BETWEEN budat2 AND budat1 AND ekpo~werks NOT IN ('FZ11','FZ18','FZ22','FZ25') AND ekko~bsart NOT IN ('ZNB','ZRB','RB') ORDER BY ekko~ebeln.
+    DELETE ADJACENT DUPLICATES FROM it_ebeln.
+    itab_ac-po = lines( it_ebeln ).
+
+    "---------------有效采购订单未清数量
+    CLEAR: pp_menge1,pp_menge2,pp_menge3,pp_menge4.
+    SELECT SUM( ekbe~menge ) INTO pp_menge1 FROM ekbe
+      INNER JOIN ekko ON ekko~ebeln = ekbe~ebeln
+      INNER JOIN ekpo ON ekpo~ebeln = ekbe~ebeln AND ekpo~ebelp = ekbe~ebelp
+         WHERE ekbe~matnr = itab_ac-matnr  AND ekko~memory <> 'X' AND ekpo~elikz <> 'X' AND ( bwart = '101' OR bwart = '121' OR bwart = '123' OR bwart = '162')
+             AND ekpo~werks NOT IN ('FZ11','FZ18','FZ22','FZ25')  AND ekko~bsart IN ('ZNB','NB','ZEB','ZPB','ZLB','ZDB').
+
+    SELECT SUM( ekbe~menge ) INTO pp_menge2 FROM ekbe
+      INNER JOIN ekko ON ekko~ebeln = ekbe~ebeln
+      INNER JOIN ekpo ON ekpo~ebeln = ekbe~ebeln AND ekpo~ebelp = ekbe~ebelp
+      WHERE ekbe~matnr = itab_ac-matnr  AND ekko~memory <> 'X' AND ekpo~elikz <> 'X' AND  ( bwart = '102' OR bwart = '122' OR bwart = '161')
+           AND ekpo~werks NOT IN ('FZ11','FZ18','FZ22','FZ25')   AND ekko~bsart  IN ('ZNB','NB','ZEB','ZPB','ZLB','ZDB').
+
+    SELECT SUM( ekpo~menge ) INTO pp_menge3 FROM ekpo
+      INNER JOIN ekko ON ekko~ebeln = ekpo~ebeln
+      WHERE ekpo~matnr = itab_ac-matnr AND ekpo~loekz <> 'L'  AND ekpo~retpo <> 'X' AND ekpo~elikz <> 'X'  AND ekko~memory <> 'X'
+           AND ekpo~werks NOT IN ('FZ11','FZ18','FZ22','FZ25')  AND ekko~bsart IN ('ZNB','NB','ZEB','ZPB','ZLB','ZDB').
+
+    SELECT SUM( ekpo~menge ) INTO pp_menge4 FROM ekpo
+       INNER JOIN ekko ON ekko~ebeln = ekpo~ebeln
+       WHERE ekpo~matnr = itab_ac-matnr AND ekpo~loekz <> 'L'  AND ekpo~retpo = 'X'  AND ekpo~elikz <> 'X'  AND ekko~memory <> 'X'
+          AND ekpo~werks NOT IN ('FZ11','FZ18','FZ22','FZ25')  AND ekko~bsart  IN ('ZNB','NB','ZEB','ZPB','ZLB','ZDB').
+
+    itab_ac-menge_po = pp_menge3 - pp_menge4 - pp_menge1 + pp_menge2.      "未清采购订单数=订单数-退货数-进仓数+冲单数
+
+
+    "生产订单预留
+    CLEAR:pp_bdmng,pp_enmng.
+    SELECT SUM( bdmng ) SUM( enmng ) INTO (pp_bdmng,pp_enmng) "--------预留数量
+      FROM resb
+      WHERE matnr = itab_ac-matnr AND xloek <> 'X' AND kzear <> 'X' AND kzkup <> 'X' AND postp <> 'T' AND werks NOT IN ( 'FZ11','FZ18','FZ22','FZ25' ) AND aufnr <> '' AND resb~bdmng > resb~enmng. " AND XWAOK = 'X '
+    itab_ac-menge_yl = pp_bdmng - pp_enmng.
+
+    "判断物料90天内下单次数来定义A/B/C类：90天内，下单次数＜3，A类 90天内，下单次数≥3，B类
+    IF itab_ac-po < 3.
+      itab_ac-ckfl = 'A'.
+    ELSE.
+      itab_ac-ckfl = 'B'.
+    ENDIF.
+
+    FREE :itab_a.
+    CLEAR  it_migo.
+
+    CASE itab_ac-ckfl. "分类
+      WHEN 'A'.
+        itab_ac-menge2 = itab_ac-erfmg1 * itab_ac-kcxs.  "最低库存 = 三个月平均月用量 * 库存系数
+        itab_ac-txsh = itab_ac-menge2 - itab_ac-mengek.  " 提醒送货 = 最低库存 - 现有库存
+      WHEN 'B'.
+        "允许入库数量，分两种情况：（1）有预判月均销量数据的，则可允许入库数量=预判月均销量*系数-当前库存总数量
+        "                          （2）无预判月均销量数据的，则可允许入库数量=前3个月月均销量*系数-当前库存总数量
+        "                               当允许入库数量 ＞＝ 生产订单预留，则等于可允许入库数量；                     20230227
+        "                               当允许入库数量 ＜ 生产订单预留，则等于可允许入库数量+生产订单预留数
+        IF itab_ac-yj_menge > 0 .
+          itab_ac-mengex = itab_ac-yj_menge * itab_ac-kcxs - itab_ac-mengek.
+        ELSE.
+          itab_ac-mengex = itab_ac-erfmg1 * itab_ac-kcxs - itab_ac-mengek.  "允许入库数量
+
+          IF itab_ac-mengex >= itab_ac-menge_yl.
+            itab_ac-mengex = itab_ac-mengex.
+          ELSE.
+            itab_ac-mengex = itab_ac-mengex + itab_ac-menge_yl.
+          ENDIF.
+        ENDIF.
+*      ITAB_AC-MENGEX = ITAB_AC-MENGE - ITAB_AC-MENGEK . "允许入库量 = 最高库存 - 现有库存
+      WHEN OTHERS.
+*       ITAB_AC-BEIZHU = '物料暂未控制，如需控制，请更新控制表！'.
+    ENDCASE.
+
+
+    MODIFY itab_ac.
+  ENDLOOP.
+
+  LOOP AT itab_ac.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+      EXPORTING
+        input  = itab_ac-matnr
+      IMPORTING
+        output = itab_ac-matnr.
+    MODIFY itab_ac TRANSPORTING matnr.
+
+  ENDLOOP.
+
+  MOVE-CORRESPONDING itab_ac[] TO o_itab[].
+
+ENDFUNCTION.
